@@ -26,7 +26,7 @@ To modify the code for your own, you must first input the SSID and password of y
 * Please note that currently this project only works for iPhone, and I will be working on an android version as soon as I get a friend with an android willing to help.
 Next, please enter into your iPhone's shortcuts app, it will be utilised to send the ESP32 the coordinates necessary to track your phone. Create a new shortcut and follow the steps outlined in the following photo.
 
-![image](https://github.com/user-attachments/assets/64a06293-dd82-4510-9d7c-38e8c169f70e)
+<img src= "https://github.com/user-attachments/assets/64a06293-dd82-4510-9d7c-38e8c169f70e" width=50% height=50%>
 
 If you are not able to find the actions necessary to make the shortcut, I will also attach a link to copy the shortcut entirely.
 Next, create a personal discord server. Nothing fancy needs to happen in it, the default server settings should do. Click on the settings of your "general" channel, go to the integrations tab, and enter the webhooks subtab. From here, create a new webhook, and copy the webhook url (you will need to paste it into the code starting from "/api...")
