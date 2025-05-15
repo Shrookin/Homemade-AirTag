@@ -1,8 +1,7 @@
-#include <WiFi.h>
-#include <WebServer.h>
-#include <TinyGPS++.h>
-#include <HardwareSerial.h>
-#include <WiFiClientSecure.h>
+#include <WiFi.h> // Lets the ESP32 connect to a WiFi network
+#include <TinyGPS++.h> // Parses the NEO-6M GPS data 
+#include <HardwareSerial.h> // Allows use of the ESP32's extra UART ports
+#include <WiFiClientSecure.h> // Lets the ESP32 make HTTPS requests 
 
 // ==== Wi-Fi Credentials ====
 const char* ssid = "YOUR_HOTSPOT_NAME_HERE";
@@ -33,19 +32,26 @@ WebServer server(80);
 // Coordinates
 const int AVERAGE_SIZE = 1;
 double phoneLat = 0.0, phoneLon = 0.0;
+
+// Coordinate buffers (uninplemented atm)
 double latBuffer[AVERAGE_SIZE];
 double lonBuffer[AVERAGE_SIZE];
 int bufferIndex = 0;
+
+
 bool alarmTriggered = false;
 bool phoneLocationReceived = false;
 
 void handleGPS() {
+
+  // extracts lat and lon values and cleans the string
   String latRaw = server.arg("lat");
   String lonRaw = server.arg("lon");
 
   latRaw.replace("[", ""); latRaw.replace("]", "");
   lonRaw.replace("[", ""); lonRaw.replace("]", "");
 
+  // converts strings to floats
   phoneLat = latRaw.toFloat();
   phoneLon = lonRaw.toFloat();
 
@@ -53,20 +59,25 @@ void handleGPS() {
     phoneLocationReceived = true;
   }
 
+  // printing coordinates
   Serial.println("Phone GPS Received:");
   Serial.print("Lat: "); Serial.println(phoneLat, 6);
   Serial.print("Lon: "); Serial.println(phoneLon, 6);
 
+  // sending response to phone confirming reciept
   server.send(200, "text/plain", "GPS received");
 }
 
 void notifyDiscord(double lat, double lon) {
+
+  // uses HTTPS to connect to discord
   WiFiClientSecure client;
-  client.setInsecure();
+  client.setInsecure(); // disables certificate validation
 
   // Hardcoded Discord IP to bypass DNS on hotspot
   IPAddress discordIP(162, 159, 135, 232);
 
+  // Connects to Discord’s server over HTTPS. If failed, it returns
   Serial.print("Connecting to Discord IP...");
   if (!client.connect(discordIP, httpsPort)) {
     Serial.println("HTTPS IP connect failed.");
@@ -74,6 +85,7 @@ void notifyDiscord(double lat, double lon) {
   }
   Serial.println("Connected!");
 
+  // Constructs the JSON payload with the ESP32's last known coordinates
   String latStr = String(lat, 6);
   String lonStr = String(lon, 6);
   String message = "{\"content\":\" ESP32 ALERT:\\nLat: " + latStr + "\\nLon: " + lonStr + "\"}";
@@ -81,6 +93,7 @@ void notifyDiscord(double lat, double lon) {
   Serial.println("Payload:");
   Serial.println(message);
 
+  // Sends a POST request with headers and JSON body to the Discord webhook
   client.println("POST " + String(webhookPath) + " HTTP/1.1");
   client.println("Host: discord.com");
   client.println("User-Agent: ESP32WebhookClient");
@@ -90,6 +103,7 @@ void notifyDiscord(double lat, double lon) {
   client.println();
   client.println(message);
 
+  // waiting for and printing Discord’s response
   while (client.connected() || client.available()) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
@@ -97,16 +111,20 @@ void notifyDiscord(double lat, double lon) {
     }
   }
 
+  // closing connection
   client.stop();
   Serial.println("Discord notification sent.");
 }
 
 void setup() {
+
+  // setup of pins
   Serial.begin(115200);
   GPSSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
+  // attempting to connect to wifi, if failed, repeat 20 times
   WiFi.config(local_IP, gateway, subnet);
   WiFi.begin(ssid, password);
   Serial.print("Connecting to Wi-Fi");
@@ -117,6 +135,7 @@ void setup() {
     Serial.print(".");
   }
 
+  // reporting on wifi connectivity
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWi-Fi connected!");
     Serial.print("IP Address: "); Serial.println(WiFi.localIP());
@@ -124,18 +143,23 @@ void setup() {
     Serial.println("\nFailed to connect to Wi-Fi");
   }
 
+  // registers the /gps route and starts the HTTP server
   server.on("/gps", handleGPS);
   server.begin();
   Serial.println("Web server started at /gps");
 }
 
 void loop() {
+
+  // handles any new HTTP requests from phone
   server.handleClient();
 
+  // reads GPS data byte-by-byte and feeds it into TinyGPS++ to update position
   while (GPSSerial.available() > 0) {
     gps.encode(GPSSerial.read());
   }
 
+  // logging GPS fix only upon change
   static bool hadFix = false;
   if (!gps.location.isValid()) {
     if (hadFix) {
@@ -148,12 +172,20 @@ void loop() {
     hadFix = true;
   }
 
+  // if phone has yet to send location, continue to next iteration of loop
   if (!phoneLocationReceived) {
     Serial.println("Waiting for valid phone GPS coordinates...");
     return;
   }
 
-  if (gps.location.isUpdated() && gps.hdop.isValid() && gps.hdop.hdop() < 2.5) {
+  //
+  if (gps.location.isUpdated() && gps.hdop.isValid() && gps.hdop.hdop() < 2.5) { 
+  /* Only run logic if:
+     New GPS data is available
+     Horizontal dilution of precision is valid and small (i.e. good signal)
+  */
+
+  // Averages GPS samples (currently just 1, but you can increase AVERAGE_SIZE later to smooth out noise).
     latBuffer[bufferIndex] = gps.location.lat();
     lonBuffer[bufferIndex] = gps.location.lng();
     bufferIndex = (bufferIndex + 1) % AVERAGE_SIZE;
@@ -167,22 +199,26 @@ void loop() {
     double avgLat = sumLat / AVERAGE_SIZE;
     double avgLon = sumLon / AVERAGE_SIZE;
 
+    // printing to serial monitor GPS coordinates of phone and device
     Serial.println("GPS Coordinates Comparison:");
     Serial.print("Phone Lat: "); Serial.println(phoneLat, 6);
     Serial.print("Phone Lon: "); Serial.println(phoneLon, 6);
     Serial.print("ESP32 Lat: "); Serial.println(avgLat, 6);
     Serial.print("ESP32 Lon: "); Serial.println(avgLon, 6);
 
+    // Calculates distance between ESP32’s average GPS and the phone's coordinates
     double dist = TinyGPSPlus::distanceBetween(avgLat, avgLon, phoneLat, phoneLon);
     Serial.print("Distance to phone: ");
     Serial.print(dist); Serial.println(" meters");
 
-    if (dist > 25.0 && !alarmTriggered) {
+    if (dist > 25.0 && !alarmTriggered) { // if coordinate distance is greater than 25 and alarm has yet to trigger
       alarmTriggered = true;
 
+      // activating buzzer
       Serial.println("Triggering buzzer...");
       digitalWrite(BUZZER_PIN, HIGH);
 
+      // calling upon norifyDiscord function with last coordinates of device
       Serial.println("Sending Discord notification...");
       notifyDiscord(avgLat, avgLon);
     }
