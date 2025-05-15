@@ -12,7 +12,7 @@ IO4 <--> TXD
 These connections will be utilised as UART to allow the NEO-6M to send information to the ESP32; while the ESP itself does not require sending information to the NEO-6M at the moment, it does not hurt to connect the pins in case a future version will require somthing of the sort.
 Next, connect the buzzer anode to IO27 on the ESP32, connect the cathode to another GND pin. The final circuit should look like this schematic, reference it if you get confused at any point.
 
-![image](https://github.com/user-attachments/assets/6724c615-d056-4b5d-93d0-86e8fef3b8a5)
+<img src= "https://github.com/user-attachments/assets/6724c615-d056-4b5d-93d0-86e8fef3b8a5" width=50% height=50%>
 
 To power the project once it is disconnected from a computer, you should connect a 9V battery (please note that most 9V batteries do not come with an adapter to USB-C, which is the connection type of the ESP32, so buying one may be necessary). If everything went as planned, the circuit should be complete!
 
@@ -26,7 +26,7 @@ To modify the code for your own, you must first input the SSID and password of y
 * Please note that currently this project only works for iPhone, and I will be working on an android version as soon as I get a friend with an android willing to help.
 Next, please enter into your iPhone's shortcuts app, it will be utilised to send the ESP32 the coordinates necessary to track your phone. Create a new shortcut and follow the steps outlined in the following photo.
 
-<img src= "https://github.com/user-attachments/assets/64a06293-dd82-4510-9d7c-38e8c169f70e" width=50% height=50%>
+<img src= "https://github.com/user-attachments/assets/64a06293-dd82-4510-9d7c-38e8c169f70e" width=25% height=25%>
 
 If you are not able to find the actions necessary to make the shortcut, I will also attach a link to copy the shortcut entirely.
 Next, create a personal discord server. Nothing fancy needs to happen in it, the default server settings should do. Click on the settings of your "general" channel, go to the integrations tab, and enter the webhooks subtab. From here, create a new webhook, and copy the webhook url (you will need to paste it into the code starting from "/api...")
