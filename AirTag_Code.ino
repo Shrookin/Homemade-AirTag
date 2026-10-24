@@ -1,16 +1,29 @@
 #include <WiFi.h> // Lets the ESP32 connect to a WiFi network
 #include <TinyGPS++.h> // Parses the NEO-6M GPS data 
 #include <HardwareSerial.h> // Allows use of the ESP32's extra UART ports
-#include <WiFiClientSecure.h> // Lets the ESP32 make HTTPS requests 
+#include <WiFiClientSecure.h>
+#include <WebServer.h>
+#include <time.h>
+#include <math.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include "discord_root_ca.h"
+#if __has_include("AirTagConfig.h")
+#include "AirTagConfig.h"
+#else
+#include "AirTagConfig.example.h"
+#endif
 
-// ==== Wi-Fi Credentials ====
-const char* ssid = "YOUR_HOTSPOT_NAME_HERE";
-const char* password = "YOUR_HOTSPOT_PASSWORD_HERE";
-
-// ==== Discord Webhook Info ====
+// Local credentials live in ignored AirTagConfig.h, never in tracked source.
+const char* ssid = AIRTAG_WIFI_SSID;
+const char* password = AIRTAG_WIFI_PASSWORD;
 const char* discordHost = "discord.com";
 const int httpsPort = 443;
-const char* webhookPath = "YOUR_DISCORD_WEBHOOKS_LINK_HERE";
+const char* webhookPath = AIRTAG_DISCORD_WEBHOOK_PATH;
+const char* gpsKey = AIRTAG_GPS_KEY;
+bool configured = false;
+unsigned long lastPhoneUpdate = 0;
+constexpr unsigned long PHONE_LOCATION_TTL_MS = 120000;
 
 // ==== Static IP (Optional) ====
 IPAddress local_IP(172, 20, 10, 2);
@@ -42,29 +55,51 @@ int bufferIndex = 0;
 bool alarmTriggered = false;
 bool phoneLocationReceived = false;
 
-void handleGPS() {
-
-  // extracts lat and lon values and cleans the string
-  String latRaw = server.arg("lat");
-  String lonRaw = server.arg("lon");
-
-  latRaw.replace("[", ""); latRaw.replace("]", "");
-  lonRaw.replace("[", ""); lonRaw.replace("]", "");
-
-  // converts strings to floats
-  phoneLat = latRaw.toFloat();
-  phoneLon = lonRaw.toFloat();
-
-  if (phoneLat != 0.0 || phoneLon != 0.0) {
-    phoneLocationReceived = true;
+bool validGpsKey(const char* key) {
+  if (strlen(key) != 64) return false;
+  for (size_t i = 0; i < 64; ++i) {
+    if (!isxdigit(static_cast<unsigned char>(key[i]))) return false;
   }
+  return true;
+}
 
-  // printing coordinates
-  Serial.println("Phone GPS Received:");
-  Serial.print("Lat: "); Serial.println(phoneLat, 6);
-  Serial.print("Lon: "); Serial.println(phoneLon, 6);
+bool authorizedGpsRequest() {
+  const String supplied = server.header("X-AirTag-Key");
+  if (supplied.length() != 64) return false;
+  unsigned char difference = 0;
+  for (size_t i = 0; i < 64; ++i) difference |= supplied[i] ^ gpsKey[i];
+  return difference == 0;
+}
 
-  // sending response to phone confirming reciept
+bool parseCoordinate(const String& value, double minimum, double maximum, double& result) {
+  if (value.isEmpty() || value.length() > 24) return false;
+  char* end = nullptr;
+  result = strtod(value.c_str(), &end);
+  return end != value.c_str() && *end == '\0' && isfinite(result) && result >= minimum && result <= maximum;
+}
+
+void handleGPS() {
+  server.sendHeader("Cache-Control", "no-store");
+  if (!authorizedGpsRequest()) {
+    server.send(401, "text/plain", "Unauthorized");
+    return;
+  }
+  // No browser website, including localhost, may drive this device endpoint.
+  if (!server.header("Origin").isEmpty()) {
+    server.send(403, "text/plain", "Browser requests are not allowed");
+    return;
+  }
+  double latitude, longitude;
+  if (!server.hasArg("lat") || !server.hasArg("lon") || server.args() != 2 ||
+      !parseCoordinate(server.arg("lat"), -90.0, 90.0, latitude) ||
+      !parseCoordinate(server.arg("lon"), -180.0, 180.0, longitude)) {
+    server.send(400, "text/plain", "Valid lat and lon fields are required");
+    return;
+  }
+  phoneLat = latitude;
+  phoneLon = longitude;
+  lastPhoneUpdate = millis();
+  phoneLocationReceived = true;
   server.send(200, "text/plain", "GPS received");
 }
 
@@ -72,26 +107,25 @@ void notifyDiscord(double lat, double lon) {
 
   // uses HTTPS to connect to discord
   WiFiClientSecure client;
-  client.setInsecure(); // disables certificate validation
-
-  // Hardcoded Discord IP to bypass DNS on hotspot
-  IPAddress discordIP(162, 159, 135, 232);
-
-  // Connects to Discord’s server over HTTPS. If failed, it returns
-  Serial.print("Connecting to Discord IP...");
-  if (!client.connect(discordIP, httpsPort)) {
-    Serial.println("HTTPS IP connect failed.");
+  if (time(nullptr) < 1767225600) {
+    Serial.println("Clock not synchronized; refusing unverified HTTPS.");
     return;
   }
-  Serial.println("Connected!");
+  client.setCACert(discordRootCA);
+  client.setHandshakeTimeout(10);
+  client.setTimeout(5000);
+
+  // Connect by DNS name so SNI and certificate hostname verification apply.
+  if (!client.connect(discordHost, httpsPort)) {
+    Serial.println("Verified Discord HTTPS connection failed.");
+    return;
+  }
 
   // Constructs the JSON payload with the ESP32's last known coordinates
   String latStr = String(lat, 6);
   String lonStr = String(lon, 6);
   String message = "{\"content\":\" ESP32 ALERT:\\nLat: " + latStr + "\\nLon: " + lonStr + "\"}";
 
-  Serial.println("Payload:");
-  Serial.println(message);
 
   // Sends a POST request with headers and JSON body to the Discord webhook
   client.println("POST " + String(webhookPath) + " HTTP/1.1");
@@ -103,17 +137,16 @@ void notifyDiscord(double lat, double lon) {
   client.println();
   client.println(message);
 
-  // waiting for and printing Discord’s response
-  while (client.connected() || client.available()) {
-    if (client.available()) {
-      String line = client.readStringUntil('\n');
-      Serial.println(line);
-    }
-  }
-
-  // closing connection
+  // Bound response waiting and do not log webhook response bodies or coordinates.
+  const unsigned long responseStart = millis();
+  while (!client.available() && client.connected() && millis() - responseStart < 5000) delay(10);
+  if (client.available()) {
+    const String status = client.readStringUntil('\n');
+    if (status.startsWith("HTTP/1.1 204") || status.startsWith("HTTP/1.1 200"))
+      Serial.println("Discord notification accepted.");
+    else Serial.println("Discord notification failed.");
+  } else Serial.println("Discord response timed out.");
   client.stop();
-  Serial.println("Discord notification sent.");
 }
 
 void setup() {
@@ -123,6 +156,15 @@ void setup() {
   GPSSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+
+  configured = validGpsKey(gpsKey) && strlen(ssid) > 0 && strlen(password) >= 8 &&
+    String(webhookPath).startsWith("/api/webhooks/") &&
+    String(webhookPath).indexOf('\r') < 0 && String(webhookPath).indexOf('\n') < 0 &&
+    String(webhookPath).indexOf(' ') < 0;
+  if (!configured) {
+    Serial.println("Configure Wi-Fi, webhook path and a random 64-hex GPS key in AirTagConfig.h first.");
+    return;
+  }
 
   // attempting to connect to wifi, if failed, repeat 20 times
   WiFi.config(local_IP, gateway, subnet);
@@ -143,13 +185,20 @@ void setup() {
     Serial.println("\nFailed to connect to Wi-Fi");
   }
 
-  // registers the /gps route and starts the HTTP server
-  server.on("/gps", handleGPS);
+  // Certificate validation requires real time. Failure stays closed in notifyDiscord.
+  configTime(0, 0, "time.google.com", "pool.ntp.org");
+  const char* collectedHeaders[] = {"X-AirTag-Key", "Origin"};
+  server.collectHeaders(collectedHeaders, 2);
+  server.on("/gps", HTTP_POST, handleGPS);
+  server.onNotFound([]() { server.send(404, "text/plain", "Not found"); });
   server.begin();
   Serial.println("Web server started at /gps");
 }
 
 void loop() {
+  if (!configured) { delay(1000); return; }
+  if (phoneLocationReceived && millis() - lastPhoneUpdate > PHONE_LOCATION_TTL_MS)
+    phoneLocationReceived = false;
 
   // handles any new HTTP requests from phone
   server.handleClient();
@@ -198,13 +247,6 @@ void loop() {
 
     double avgLat = sumLat / AVERAGE_SIZE;
     double avgLon = sumLon / AVERAGE_SIZE;
-
-    // printing to serial monitor GPS coordinates of phone and device
-    Serial.println("GPS Coordinates Comparison:");
-    Serial.print("Phone Lat: "); Serial.println(phoneLat, 6);
-    Serial.print("Phone Lon: "); Serial.println(phoneLon, 6);
-    Serial.print("ESP32 Lat: "); Serial.println(avgLat, 6);
-    Serial.print("ESP32 Lon: "); Serial.println(avgLon, 6);
 
     // Calculates distance between ESP32’s average GPS and the phone's coordinates
     double dist = TinyGPSPlus::distanceBetween(avgLat, avgLon, phoneLat, phoneLon);
